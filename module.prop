@@ -1,0 +1,6 @@
+id=data_mountopt_fix
+name=/data 挂载参数修正 [仅测 K20Pro/MIUI12.5.6/A11]
+version=1.0
+versionCode=10000
+author=wanfooo
+description=[启动中] 等待开机看护服务…
