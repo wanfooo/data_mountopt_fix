@@ -1,6 +1,15 @@
 # data_mountopt_fix
 
-> ## ⚠️ 测试环境（重要）
+> **Magisk / KernelSU / APatch module for fixing Android `/data` mount option anomalies caused by `errors=remount-ro`.**
+>
+> Fixes Momo's **「分区挂载异常」 / abnormal partition mount** detection when the actual `/data` mount options no longer match the ROM's `fstab`.
+
+**关键词 / Keywords:** Android root · Magisk · KernelSU · APatch · Zygisk · `/data` · `errors=remount-ro` · `errors=continue` · mount options · mountinfo · fstab · Momo · partition mount anomaly
+
+---
+
+## ⚠️ 测试环境（重要）
+
 > 本模块**仅在下面这一台设备上实测通过**，没有在其它机型/ROM 上验证过：
 >
 > | 项目 | 值 |
@@ -24,11 +33,39 @@
 > `fstab.qcom` by removing an unexpected `errors=remount-ro`.
 > Fixes Momo's "分区挂载异常" (abnormal partition mount) detection.
 
----
+## 它解决什么问题？
+
+在部分 Android Root 环境中，开机早期可能有某个 root / Zygisk 相关组件执行：
+
+```sh
+mount -o remount,errors=remount-ro /data
+```
+
+这样会让实际 `/data` mount options 与 ROM 的 `fstab` 声明不一致，
+从而触发 Momo 的 **「分区挂载异常」**（abnormal partition mount）检测。
+
+本模块针对的是这一类特定问题：
+
+```text
+/data
+  ↓
+unexpected errors=remount-ro
+  ↓
+实际 mount options ≠ ROM fstab
+  ↓
+Momo：分区挂载异常
+  ↓
+移除 unexpected errors=remount-ro
+  ↓
+mount options 恢复与 ROM 声明一致
+```
+
+> **注意：** 本模块不是用来隐藏 Root、欺骗 Momo 或伪造 `mountinfo`。
+> 它直接修正实际的 `/data` mount option。
 
 ## 背景
 
-在部分机器上（本次实测：**Redmi K20 Pro / MIUI 12 / Android 11**，
+在部分机器上（本次实测：**Redmi K20 Pro / MIUI 12.5.6 / Android 11**，
 Magisk Kitsune + **Zygisk Next** + LSPosed），开机早期会有某个 root 组件执行：
 
 ```sh
@@ -70,6 +107,11 @@ mount -o remount,errors=remount-ro /data
   就 `mount -o remount,errors=continue /data` 还原成 fstab 声明的状态
 
 修正计数与动作写 `/data/local/tmp/datafix.log`（自动只留最近 300 行）。
+
+### 为什么不是只修一次？
+
+因为实际观察到的 `errors=remount-ro` 可能在之后再次出现，
+所以模块不是“开机修一次然后退出”，而是持续监视并在再次出现时再次修正。
 
 ## 状态查看
 
@@ -134,6 +176,26 @@ DESC_EVERY=60        # 状态文本最快每 60 秒刷一次
 3. 你在意 Momo 之类的检测报「分区挂载异常」。
 
 如果 `/data` 本来就没有这个选项，装本模块不会有任何变化（空转，不写状态外的东西）。
+
+## 搜索关键词
+
+本项目针对以下问题和关键词：
+
+- Momo 分区挂载异常
+- Momo `/data` 挂载异常
+- Android `/data` mount anomaly
+- Android abnormal partition mount
+- `errors=remount-ro`
+- `errors=continue`
+- `/data` mount options
+- `/data` mountinfo
+- Android fstab mismatch
+- Magisk `/data` remount
+- KernelSU `/data` mount
+- Zygisk `/data` remount
+- Zygisk mount namespace
+- Magisk module for `/data` mount options
+- KernelSU module for mount option fix
 
 ## License
 
