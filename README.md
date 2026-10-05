@@ -3,6 +3,8 @@
 > **Magisk / KernelSU / APatch module for fixing Android `/data` mount option anomalies caused by `errors=remount-ro`.**
 >
 > Fixes Momo's **「分区挂载异常」 / abnormal partition mount** detection when the actual `/data` mount options no longer match the ROM's `fstab`.
+>
+> On the tested Redmi K20 Pro, the root cause has been traced to **LSPosed's `lspd` daemon**: its `dex2oat` replacement performs a bind mount followed by `MS_RDONLY | MS_REMOUNT | MS_BIND`. On this device's 4.14.180 vendor kernel, that remount unexpectedly affects the shared userdata ext4 superblock and makes `/data` expose `errors=remount-ro`.
 
 **关键词 / Keywords:** Android root · Magisk · KernelSU · APatch · Zygisk · `/data` · `errors=remount-ro` · `errors=continue` · mount options · mountinfo · fstab · Momo · partition mount anomaly
 
@@ -35,16 +37,36 @@
 
 ## 它解决什么问题？
 
-在部分 Android Root 环境中，开机早期可能有某个 root / Zygisk 相关组件执行：
+在本次实测设备上，已经通过内核 tracepoint + 进程侧日志把问题定位到了 **LSPosed 的 `lspd` 守护进程**，并不是某个组件直接执行：
 
 ```sh
 mount -o remount,errors=remount-ro /data
 ```
 
-这样会让实际 `/data` mount options 与 ROM 的 `fstab` 声明不一致，
-从而触发 Momo 的 **「分区挂载异常」**（abnormal partition mount）检测。
+实际发生的是：
 
-本模块针对的是这一类特定问题：
+```text
+lspd
+  ↓
+bind mount LSPosed 自己的 dex2oat
+/data/adb/modules/zygisk_lsposed/bin/dex2oat
+  → /apex/com.android.art/bin/dex2oat64|32
+  ↓
+MS_RDONLY | MS_REMOUNT | MS_BIND
+  ↓
+本设备内核的 ext4_remount() 处理到了共享的 userdata ext4 superblock
+  ↓
+/data 出现 errors=remount-ro
+  ↓
+Momo：分区挂载异常
+```
+
+原因在于 `/apex/.../dex2oat*` 的目标文件位于 `/data` 所在的 userdata 文件系统上。
+LSPosed 的 bind mount 后续 remount 在这台设备的 **4.14.180-perf** 厂商内核上产生了
+超出预期的 superblock 级副作用，因此最终整个 `/data` 的挂载信息中出现
+`errors=remount-ro`。
+
+本模块针对的是最终暴露出来的这一类 `/data` mount option anomaly：
 
 ```text
 /data
@@ -65,12 +87,40 @@ mount options 恢复与 ROM 声明一致
 
 ## 背景
 
-在部分机器上（本次实测：**Redmi K20 Pro / MIUI 12.5.6 / Android 11**，
-Magisk Kitsune + **Zygisk Next** + LSPosed），开机早期会有某个 root 组件执行：
+在本次实测机器（**Redmi K20 Pro / MIUI 12.5.6 / Android 11**，
+Magisk Kitsune + **Zygisk Next** + LSPosed）上，已经定位到具体触发链：
+
+```text
+init (PID 1)
+  └─ zygisk_lsposed/daemon
+      └─ lspd (UID 0)
+          ├─ bind mount dex2oat64
+          ├─ remount dex2oat64 as read-only
+          ├─ bind mount dex2oat32
+          └─ remount dex2oat32 as read-only
+```
+
+其中 `lspd` 执行的关键操作等价于：
 
 ```sh
-mount -o remount,errors=remount-ro /data
+mount("/data/adb/modules/zygisk_lsposed/bin/dex2oat",
+      "/apex/com.android.art/bin/dex2oat64",
+      NULL, MS_BIND, NULL)
+
+mount(NULL,
+      "/apex/com.android.art/bin/dex2oat64",
+      NULL, MS_RDONLY | MS_REMOUNT | MS_BIND, NULL)
 ```
+
+以及对应的 `dex2oat32` 操作。
+
+在这台设备的 **4.14.180-perf** 内核上，这个 bind mount + remount
+没有只停留在目标 mount point 的属性层面，而是进入了 `ext4_remount()`，
+影响了共享的 userdata ext4 superblock，最终让 `/data` 出现
+`errors=remount-ro`。
+
+因此，**这里不是“有人把 `/data` 直接 remount 成 `errors=remount-ro`”**，
+而是一个特定的 **LSPosed dex2oat 挂载行为 × 该设备厂商内核** 的兼容性问题。
 
 而 `/vendor/etc/fstab.qcom` 中 `/data` 的声明是：
 
@@ -160,12 +210,14 @@ DESC_EVERY=60        # 状态文本最快每 60 秒刷一次
 
 ## 已知限制
 
-- 没有定位到「谁」在做这次 remount，所以修正发生在它出现之后（≤ `STEADY_SLEEP` 秒）。
-  若某个应用恰好在这段窗口里读取挂载表，理论上仍可能看到一次异常；
-  把 `STEADY_SLEEP` 调小可以缩小窗口。
-- `mount -o remount,errors=continue` 会让 ext4 在出错时保持挂载而不是转为只读，
-  这与本 ROM fstab 声明的默认行为一致；介意的话可以删掉本模块。
-- **只在 Redmi K20 Pro / MIUI 12.5.6 / Android 11 上实测过**，其它机型/ROM 未验证。
+- **本模块不会修改 LSPosed，也不会阻止 `lspd` 的 dex2oat 挂载行为。**
+  它只在异常的 `errors=remount-ro` 已经出现后，将 `/data` 恢复到 `errors=continue`。
+- `errors=remount-ro` 可能再次出现，因此模块仍采用常驻看护；修正发生在异常出现之后
+  （通常不超过 `STEADY_SLEEP` 秒）。在这个时间窗口内，其他程序理论上仍可能短暂读到异常挂载参数。
+- 当前已经确认的完整触发链只针对 **Redmi K20 Pro / MIUI 12.5.6 / Android 11 /
+  4.14.180-perf** 这套环境。其它机型、内核、ROM 或 LSPosed 版本可能存在不同原因。
+- `mount -o remount,errors=continue` 会让 ext4 在出错时保持挂载而不是转为只读；
+  这是本模块实际采用的修复方式，使用前应确认这符合你的需求。
 
 ## 适用性
 
@@ -194,6 +246,11 @@ DESC_EVERY=60        # 状态文本最快每 60 秒刷一次
 - KernelSU `/data` mount
 - Zygisk `/data` remount
 - Zygisk mount namespace
+- LSPosed `lspd` dex2oat
+- LSPosed dex2oat bind mount
+- `MS_BIND` `MS_REMOUNT` `MS_RDONLY`
+- Android ext4 `errors=remount-ro`
+- userdata ext4 superblock remount
 - Magisk module for `/data` mount options
 - KernelSU module for mount option fix
 
